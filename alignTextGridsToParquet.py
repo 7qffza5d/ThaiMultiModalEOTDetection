@@ -90,6 +90,67 @@ def strip_tags(text):
     return text.strip().lower()
 
 
+# ---------- Thai number-word parsing (for topic-number disambiguation) ----------
+
+_DIGIT_VAL = {"ศูนย์": 0, "หนึ่ง": 1, "เอ็ด": 1, "สอง": 2, "สาม": 3, "สี่": 4,
+              "ห้า": 5, "หก": 6, "เจ็ด": 7, "แปด": 8, "เก้า": 9}
+_SCALE_VAL = {"สิบ": 10, "ร้อย": 100, "พัน": 1000, "หมื่น": 10000,
+              "แสน": 100000, "ล้าน": 1000000}
+_NUM_VOCAB_SORTED = sorted(
+    list(_DIGIT_VAL) + list(_SCALE_VAL) + ["ยี่สิบ"], key=len, reverse=True
+)
+
+
+def parse_thai_number_prefix(s):
+    """Parse a leading contiguous run of Thai number words at the start of
+    `s` (e.g. 'ห้าสิบเจ็ด...' -> 57). Stops at the first character that
+    isn't part of a recognized number word, so trailing non-number text
+    (the rest of a topic description) doesn't get misread. Returns None
+    if `s` doesn't start with a number word at all."""
+    total, current, i, consumed_any = 0, 0, 0, False
+    while i < len(s):
+        matched = next((w for w in _NUM_VOCAB_SORTED if s.startswith(w, i)), None)
+        if matched is None:
+            break
+        consumed_any = True
+        i += len(matched)
+        if matched == "ยี่สิบ":
+            total += 20
+        elif matched in _SCALE_VAL:
+            total += (current or 1) * _SCALE_VAL[matched]
+            current = 0
+        else:
+            current = _DIGIT_VAL[matched]
+    total += current
+    return total if consumed_any else None
+
+
+def find_topic_number(rows):
+    """Scan a conversation's rows for a 'Topic ...' announcement and parse
+    the Thai number that follows it (optionally after a 'ที่' connector,
+    e.g. 'Topic ที่ห้าสิบเจ็ด...' or 'Topicหกสิบเก้า...'). Returns the
+    parsed integer, or None if no topic announcement is found/parseable."""
+    for row in rows:
+        norm = strip_tags(row["sentence"])
+        idx = norm.find("topic")
+        if idx == -1:
+            continue
+        rest = norm[idx + len("topic"):]
+        if rest.startswith("ที่"):
+            rest = rest[len("ที่"):]
+        value = parse_thai_number_prefix(rest)
+        if value is not None:
+            return value
+    return None
+
+
+def extract_topic_number_from_filename(filename):
+    """Extract the topic number from a filename like
+    'Hijack_S081_T069_Con123' -> 69."""
+    m = re.search(r"_T(\d+)_", filename)
+    return int(m.group(1)) if m else None
+
+
 # ---------- Step 2: Parquet-side conversation reconstruction ----------
 
 def get_speakers(speaker_id_str):
@@ -125,14 +186,19 @@ def segment_conversations_by_contiguity(rows):
 
 # ---------- Step 3: Match a TextGrid file to its parquet conversation ----------
 
-def match_textgrid_to_conversation(tg_intervals, conversations):
+def match_textgrid_to_conversation(tg_intervals, conversations, filename_topic=None):
     """Match by EXACT speaker-set equality, not just overlap — a recurring
     trio of speakers can appear together in more than one topic recording,
     so partial/best overlap is not a reliable fingerprint on its own.
 
     When multiple blocks share the exact same speaker set, disambiguate
-    using normalized text content of the first few rows, since two
-    recordings by the same trio will differ in what was actually said.
+    using the announced topic number (parsed from each candidate's own
+    'Topic ...' utterance) against the topic number in the TextGrid's
+    filename — this is far more reliable than comparing early-row text,
+    since every session by the same trio tends to open with near-identical
+    boilerplate greetings that can't distinguish one session from another.
+    Falls back to early-row text similarity + length only if topic
+    matching doesn't resolve to exactly one candidate.
 
     Returns (best_idx, was_ambiguous) or (None, False) if no exact match.
     """
@@ -149,12 +215,23 @@ def match_textgrid_to_conversation(tg_intervals, conversations):
             candidates.append(idx)
 
     if not candidates:
-        return None, False
+        return None, False, {}
     if len(candidates) == 1:
-        return candidates[0], False
+        return candidates[0], False, {}
 
-    # Disambiguate: score by content match on early rows, then by how
-    # close the row count is, and prefer more matching content first.
+    debug = {"filename_topic": filename_topic}
+    if filename_topic is not None:
+        candidate_topics = {idx: find_topic_number(conversations[idx]) for idx in candidates}
+        debug["candidate_topics"] = candidate_topics
+        topic_matches = [idx for idx, t in candidate_topics.items() if t == filename_topic]
+        if len(topic_matches) == 1:
+            return topic_matches[0], False, debug
+        if len(topic_matches) > 1:
+            candidates = topic_matches  # narrowed but still ambiguous
+
+    # Fallback: content similarity on early rows, then length closeness.
+    # Weaker signal (see note above) — only reached if topic matching
+    # didn't uniquely resolve the candidates.
     def score(idx):
         rows = conversations[idx]
         n_check = min(5, len(rows), len(tg_intervals))
@@ -166,7 +243,7 @@ def match_textgrid_to_conversation(tg_intervals, conversations):
         return (-text_matches, length_diff)
 
     best_idx = min(candidates, key=score)
-    return best_idx, True
+    return best_idx, True, debug
 
 
 # ---------- Step 4: Alignment verification ----------
@@ -262,7 +339,9 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
     for tg_path in tg_paths:
         session_name = os.path.splitext(os.path.basename(tg_path))[0]
         intervals = parse_textgrid(tg_path)
-        conv_idx, was_ambiguous = match_textgrid_to_conversation(intervals, conversations)
+        conv_idx, was_ambiguous, debug = match_textgrid_to_conversation(
+            intervals, conversations, filename_topic=extract_topic_number_from_filename(session_name)
+        )
 
         if conv_idx is None:
             reports.append({"session": session_name, "n_compared": 0,
@@ -274,8 +353,11 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
         report = check_alignment(intervals, parquet_rows, session_name)
         if was_ambiguous:
             report["issues"].insert(
-                0, "NOTE: multiple parquet blocks shared this exact speaker "
-                   "set; picked the best content match — verify manually."
+                0, f"NOTE: multiple parquet blocks shared this exact speaker "
+                   f"set; topic-number disambiguation did not resolve to "
+                   f"exactly one match — falling back to content similarity. "
+                   f"Debug: filename_topic={debug.get('filename_topic')}, "
+                   f"candidate_topics={debug.get('candidate_topics')}"
             )
         reports.append(report)
 
