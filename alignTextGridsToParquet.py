@@ -50,10 +50,15 @@ SPEAKER_PREFIX_RE = re.compile(r'^([\w&]+),\s*(.*)$')
 
 
 def parse_textgrid(path):
-    """Return a list of speaker-tagged intervals: {xmin, xmax, speakers,
-    raw_text, clean_text}. Standalone noise/silence intervals with no
-    speaker prefix (e.g. a leading '<n>' before anyone speaks) are dropped,
-    since these are not expected to correspond to a parquet row."""
+    """Return a list of speaker-tagged, content-bearing intervals: {xmin,
+    xmax, speakers, raw_text, clean_text}. Two kinds of intervals are
+    dropped, since neither appears to survive into the parquet transcript:
+    (1) standalone noise/silence intervals with no speaker prefix at all
+    (e.g. leading silence before anyone speaks), and (2) speaker-tagged
+    intervals whose content is PURELY tags (e.g. 'M38, <n>' — a cough or
+    noise with no actual words) — these still have a speaker prefix so
+    they'd otherwise pass the first filter, but they leave no trace in the
+    parquet row count, causing an index-shifting mismatch if kept."""
     with open(path, encoding="utf-8") as f:
         content = f.read()
 
@@ -66,6 +71,8 @@ def parse_textgrid(path):
         if not m:
             continue  # e.g. a bare "<n>" interval with no speaker
         speaker_field, clean_text = m.groups()
+        if not strip_tags(clean_text):
+            continue  # speaker-tagged but purely noise/silence tags, no words
         intervals.append({
             "xmin": float(xmin),
             "xmax": float(xmax),
