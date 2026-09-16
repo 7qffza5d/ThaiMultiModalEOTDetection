@@ -151,6 +151,15 @@ def extract_topic_number_from_filename(filename):
     return int(m.group(1)) if m else None
 
 
+def extract_mic_from_filename(filename):
+    """Extract the trailing mic-condition token from a filename like
+    'Hijack_S081_T069_Con123' -> 'con123' (lowercased, to compare against
+    the parquet's `mic` field, which uses mixed case for at least one
+    value: 'BT3m')."""
+    m = re.search(r"_([A-Za-z]+\d+)$", filename)
+    return m.group(1).lower() if m else None
+
+
 # ---------- Step 2: Parquet-side conversation reconstruction ----------
 
 def get_speakers(speaker_id_str):
@@ -186,21 +195,24 @@ def segment_conversations_by_contiguity(rows):
 
 # ---------- Step 3: Match a TextGrid file to its parquet conversation ----------
 
-def match_textgrid_to_conversation(tg_intervals, conversations, filename_topic=None):
+def match_textgrid_to_conversation(tg_intervals, conversations, filename_topic=None, filename_mic=None):
     """Match by EXACT speaker-set equality, not just overlap — a recurring
     trio of speakers can appear together in more than one topic recording,
     so partial/best overlap is not a reliable fingerprint on its own.
 
-    When multiple blocks share the exact same speaker set, disambiguate
-    using the announced topic number (parsed from each candidate's own
-    'Topic ...' utterance) against the topic number in the TextGrid's
-    filename — this is far more reliable than comparing early-row text,
-    since every session by the same trio tends to open with near-identical
-    boilerplate greetings that can't distinguish one session from another.
-    Falls back to early-row text similarity + length only if topic
-    matching doesn't resolve to exactly one candidate.
+    When multiple blocks share the exact same speaker set, this corpus has
+    a specific, expected cause: each real session's transcript appears to
+    be duplicated once per recording microphone (the paper's "5-mic total
+    duration" figure is ~5x the base session duration). The TextGrid
+    filename encodes which mic it corresponds to (e.g. '..._Con123'),
+    matching the parquet's `mic` field directly — so mic matching is tried
+    first. If that doesn't uniquely resolve it, fall back to the announced
+    topic number (parsed from each candidate's own 'Topic ...' utterance)
+    against the topic number in the filename. Early-row text similarity is
+    a last resort only, since sessions by the same trio tend to open with
+    near-identical boilerplate greetings that can't distinguish sessions.
 
-    Returns (best_idx, was_ambiguous) or (None, False) if no exact match.
+    Returns (best_idx, was_ambiguous, debug_info).
     """
     tg_speakers = set()
     for iv in tg_intervals:
@@ -219,7 +231,20 @@ def match_textgrid_to_conversation(tg_intervals, conversations, filename_topic=N
     if len(candidates) == 1:
         return candidates[0], False, {}
 
-    debug = {"filename_topic": filename_topic}
+    debug = {"filename_topic": filename_topic, "filename_mic": filename_mic}
+
+    if filename_mic is not None:
+        mic_matches = []
+        for idx in candidates:
+            conv_mics = {r["mic"].lower() for r in conversations[idx]}
+            if conv_mics == {filename_mic}:
+                mic_matches.append(idx)
+        debug["mic_matches"] = mic_matches
+        if len(mic_matches) == 1:
+            return mic_matches[0], False, debug
+        if len(mic_matches) > 1:
+            candidates = mic_matches  # narrowed but still ambiguous
+
     if filename_topic is not None:
         candidate_topics = {idx: find_topic_number(conversations[idx]) for idx in candidates}
         debug["candidate_topics"] = candidate_topics
@@ -230,8 +255,8 @@ def match_textgrid_to_conversation(tg_intervals, conversations, filename_topic=N
             candidates = topic_matches  # narrowed but still ambiguous
 
     # Fallback: content similarity on early rows, then length closeness.
-    # Weaker signal (see note above) — only reached if topic matching
-    # didn't uniquely resolve the candidates.
+    # Weakest signal (see note above) — only reached if mic and topic
+    # matching didn't uniquely resolve the candidates.
     def score(idx):
         rows = conversations[idx]
         n_check = min(5, len(rows), len(tg_intervals))
@@ -340,7 +365,9 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
         session_name = os.path.splitext(os.path.basename(tg_path))[0]
         intervals = parse_textgrid(tg_path)
         conv_idx, was_ambiguous, debug = match_textgrid_to_conversation(
-            intervals, conversations, filename_topic=extract_topic_number_from_filename(session_name)
+            intervals, conversations,
+            filename_topic=extract_topic_number_from_filename(session_name),
+            filename_mic=extract_mic_from_filename(session_name),
         )
 
         if conv_idx is None:
@@ -354,9 +381,11 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
         if was_ambiguous:
             report["issues"].insert(
                 0, f"NOTE: multiple parquet blocks shared this exact speaker "
-                   f"set; topic-number disambiguation did not resolve to "
-                   f"exactly one match — falling back to content similarity. "
-                   f"Debug: filename_topic={debug.get('filename_topic')}, "
+                   f"set; mic/topic disambiguation did not resolve to exactly "
+                   f"one match — falling back to content similarity. "
+                   f"Debug: filename_mic={debug.get('filename_mic')}, "
+                   f"mic_matches={debug.get('mic_matches')}, "
+                   f"filename_topic={debug.get('filename_topic')}, "
                    f"candidate_topics={debug.get('candidate_topics')}"
             )
         reports.append(report)
