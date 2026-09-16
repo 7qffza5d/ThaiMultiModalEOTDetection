@@ -200,24 +200,20 @@ def segment_conversations_by_contiguity(rows):
         conversations.append(current)
     return conversations
 
-def merge_adjacent_speaker_orphans(conversations):
-    """Merge adjacent conversation blocks that share at least one speaker,
-    repeating until stable. Fixes a specific failure mode of the forward
-    contiguous-segmentation pass: sessions that open with participants
-    introducing themselves one at a time (each a solo speaker sharing
-    nothing with the previous solo speaker) get fragmented into several
-    bogus 1-row 'conversations' before real dialogue (with overlapping
-    speaker sets) begins. Repeating the pass is necessary because a
-    speaker's re-appearance that justifies a merge may only become visible
-    after an earlier adjacent merge has already happened (e.g. M39-solo
-    only merges into the main block once that block is recognized to
-    contain M39 again later; a second pass is then needed for M38-solo to
-    see that the now-merged block also contains M38).
+def merge_adjacent_speaker_orphans(conversations, orphan_max_size=5):
+    """Merge adjacent conversation blocks that share a speaker, but ONLY
+    when at least one of the two blocks is still small (<= orphan_max_size
+    rows) — i.e. still plausibly a fragment, not a complete session.
 
-    This only ever merges blocks that are immediately adjacent in row
-    order, never blocks anywhere else in the dataset — so it cannot
-    reintroduce the global over-merging bug that global speaker-ID
-    clustering caused."""
+    This is a deliberately narrower rule than "any shared speaker": two
+    already-large blocks (each well above orphan_max_size) are never
+    merged, even if they share a speaker, because real sessions in this
+    corpus run into the hundreds of rows, and speakers/trios are known to
+    recur across genuinely separate sessions — merging two large blocks
+    on a shared speaker would just reintroduce the original global
+    over-merging bug, one adjacency at a time. Small fragments (like solo
+    self-introductions before the real dialogue starts) are the only
+    thing this is meant to reattach."""
     blocks = [list(c) for c in conversations]
     changed = True
     while changed:
@@ -225,16 +221,18 @@ def merge_adjacent_speaker_orphans(conversations):
         merged = []
         for block in blocks:
             if merged:
-                prev_speakers = set()
-                for r in merged[-1]:
-                    prev_speakers.update(get_speakers(r["speaker_id"]))
-                cur_speakers = set()
-                for r in block:
-                    cur_speakers.update(get_speakers(r["speaker_id"]))
-                if prev_speakers & cur_speakers:
-                    merged[-1] = merged[-1] + block
-                    changed = True
-                    continue
+                prev = merged[-1]
+                if len(prev) <= orphan_max_size or len(block) <= orphan_max_size:
+                    prev_speakers = set()
+                    for r in prev:
+                        prev_speakers.update(get_speakers(r["speaker_id"]))
+                    cur_speakers = set()
+                    for r in block:
+                        cur_speakers.update(get_speakers(r["speaker_id"]))
+                    if prev_speakers & cur_speakers:
+                        merged[-1] = prev + block
+                        changed = True
+                        continue
             merged.append(block)
         blocks = merged
     return blocks
