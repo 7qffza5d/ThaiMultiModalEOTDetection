@@ -199,6 +199,45 @@ def segment_conversations_by_contiguity(rows):
         conversations.append(current)
     return conversations
 
+def merge_adjacent_speaker_orphans(conversations):
+    """Merge adjacent conversation blocks that share at least one speaker,
+    repeating until stable. Fixes a specific failure mode of the forward
+    contiguous-segmentation pass: sessions that open with participants
+    introducing themselves one at a time (each a solo speaker sharing
+    nothing with the previous solo speaker) get fragmented into several
+    bogus 1-row 'conversations' before real dialogue (with overlapping
+    speaker sets) begins. Repeating the pass is necessary because a
+    speaker's re-appearance that justifies a merge may only become visible
+    after an earlier adjacent merge has already happened (e.g. M39-solo
+    only merges into the main block once that block is recognized to
+    contain M39 again later; a second pass is then needed for M38-solo to
+    see that the now-merged block also contains M38).
+
+    This only ever merges blocks that are immediately adjacent in row
+    order, never blocks anywhere else in the dataset — so it cannot
+    reintroduce the global over-merging bug that global speaker-ID
+    clustering caused."""
+    blocks = [list(c) for c in conversations]
+    changed = True
+    while changed:
+        changed = False
+        merged = []
+        for block in blocks:
+            if merged:
+                prev_speakers = set()
+                for r in merged[-1]:
+                    prev_speakers.update(get_speakers(r["speaker_id"]))
+                cur_speakers = set()
+                for r in block:
+                    cur_speakers.update(get_speakers(r["speaker_id"]))
+                if prev_speakers & cur_speakers:
+                    merged[-1] = merged[-1] + block
+                    changed = True
+                    continue
+            merged.append(block)
+        blocks = merged
+    return blocks
+
 
 # ---------- Step 3: Match a TextGrid file to its parquet conversation ----------
 
@@ -360,6 +399,7 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
         ds = ds.remove_columns(["audio"])
     rows = [dict(r, _orig_index=i) for i, r in enumerate(ds)]
     conversations = segment_conversations_by_contiguity(rows)
+    conversations = merge_adjacent_speaker_orphans(conversations)
     print(f"Segmented {len(conversations)} conversations from parquet "
           f"(sizes range {min(len(c) for c in conversations)}-"
           f"{max(len(c) for c in conversations)} rows).\n")
