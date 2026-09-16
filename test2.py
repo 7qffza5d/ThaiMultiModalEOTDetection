@@ -1,4 +1,4 @@
-from alignTextGridsToParquet import (
+from datasetPreparation.alignTextGridsToParquet import (
     parse_textgrid, segment_conversations_by_contiguity,
     match_textgrid_to_conversation, extract_topic_number_from_filename,
     extract_mic_from_filename,
