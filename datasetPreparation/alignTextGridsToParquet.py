@@ -174,68 +174,47 @@ def get_speakers(speaker_id_str):
     return speaker_id_str.split("&")
 
 
-def segment_conversations_by_contiguity(rows):
-    """Segment ordered rows into contiguous conversation blocks.
+def find_matching_window(rows_ordered, tg_intervals, filename_mic=None):
+    """Search rows_ordered (parquet rows in original split order) for a
+    contiguous window whose per-row speaker set sequence matches the
+    TextGrid's speaker sequence EXACTLY, row-for-row. This replaces
+    heuristic conversation segmentation entirely: rather than trying to
+    correctly carve the whole dataset into conversations (fragile — see
+    the cascading merge failures this was built to fix), it directly
+    locates where one specific session lives in the row stream.
 
-    Real conversations occupy contiguous runs of row indices (confirmed
-    earlier in this project). A run ends and a new one begins when a row's
-    speakers share NO overlap with the accumulated speaker pool of the
-    current run. This deliberately does NOT use global union-find across
-    the whole split: a participant reappearing in a different, unrelated
-    conversation elsewhere in the dataset must not merge the two together.
-    Global clustering was tried and over-merged conversations for exactly
-    this reason (a recurring speaker bridged unrelated sessions)."""
-    conversations = []
-    current, current_pool = [], set()
+    Pre-filtering to filename_mic narrows the search a lot, since mic is
+    constant within a session. Returns the matched list of rows, or None
+    if no exact match exists anywhere."""
+    if filename_mic is not None:
+        rows_ordered = [r for r in rows_ordered if r["mic"].lower() == filename_mic]
 
-    for row in rows:
-        speakers = set(get_speakers(row["speaker_id"]))
-        if current and not (speakers & current_pool):
-            conversations.append(current)
-            current, current_pool = [], set()
-        current.append(row)
-        current_pool.update(speakers)
+    tg_seq = [frozenset(iv["speakers"]) for iv in tg_intervals]
+    n = len(tg_seq)
+    row_seq = [frozenset(get_speakers(r["speaker_id"])) for r in rows_ordered]
 
-    if current:
-        conversations.append(current)
-    return conversations
+    for start in range(len(row_seq) - n + 1):
+        if row_seq[start] == tg_seq[0] and row_seq[start:start + n] == tg_seq:
+            return rows_ordered[start:start + n]
+    return None
 
-def merge_adjacent_speaker_orphans(conversations, orphan_max_size=5):
-    """Merge adjacent conversation blocks that share a speaker, but ONLY
-    when at least one of the two blocks is still small (<= orphan_max_size
-    rows) — i.e. still plausibly a fragment, not a complete session.
 
-    This is a deliberately narrower rule than "any shared speaker": two
-    already-large blocks (each well above orphan_max_size) are never
-    merged, even if they share a speaker, because real sessions in this
-    corpus run into the hundreds of rows, and speakers/trios are known to
-    recur across genuinely separate sessions — merging two large blocks
-    on a shared speaker would just reintroduce the original global
-    over-merging bug, one adjacency at a time. Small fragments (like solo
-    self-introductions before the real dialogue starts) are the only
-    thing this is meant to reattach."""
-    blocks = [list(c) for c in conversations]
-    changed = True
-    while changed:
-        changed = False
-        merged = []
-        for block in blocks:
-            if merged:
-                prev = merged[-1]
-                if len(prev) <= orphan_max_size or len(block) <= orphan_max_size:
-                    prev_speakers = set()
-                    for r in prev:
-                        prev_speakers.update(get_speakers(r["speaker_id"]))
-                    cur_speakers = set()
-                    for r in block:
-                        cur_speakers.update(get_speakers(r["speaker_id"]))
-                    if prev_speakers & cur_speakers:
-                        merged[-1] = prev + block
-                        changed = True
-                        continue
-            merged.append(block)
-        blocks = merged
-    return blocks
+def find_best_partial_window(rows_ordered, tg_intervals, filename_mic=None):
+    """Diagnostic only, used when find_matching_window fails: finds the
+    start position with the fewest per-row speaker mismatches, so a
+    failure can be inspected rather than silently guessed at."""
+    if filename_mic is not None:
+        rows_ordered = [r for r in rows_ordered if r["mic"].lower() == filename_mic]
+    tg_seq = [frozenset(iv["speakers"]) for iv in tg_intervals]
+    n = len(tg_seq)
+    row_seq = [frozenset(get_speakers(r["speaker_id"])) for r in rows_ordered]
+
+    best_start, best_mismatches = None, n + 1
+    for start in range(len(row_seq) - n + 1):
+        mismatches = sum(1 for a, b in zip(row_seq[start:start + n], tg_seq) if a != b)
+        if mismatches < best_mismatches:
+            best_start, best_mismatches = start, mismatches
+    return best_start, best_mismatches
 
 
 # ---------- Step 3: Match a TextGrid file to its parquet conversation ----------
@@ -397,11 +376,7 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
     if "audio" in ds.column_names:
         ds = ds.remove_columns(["audio"])
     rows = [dict(r, _orig_index=i) for i, r in enumerate(ds)]
-    conversations = segment_conversations_by_contiguity(rows)
-    conversations = merge_adjacent_speaker_orphans(conversations)
-    print(f"Segmented {len(conversations)} conversations from parquet "
-          f"(sizes range {min(len(c) for c in conversations)}-"
-          f"{max(len(c) for c in conversations)} rows).\n")
+    print(f"Loaded {len(rows)} rows from parquet.\n")
 
     tg_paths = sorted(glob.glob(os.path.join(textgrid_dir, "*.TextGrid")))
     print(f"Found {len(tg_paths)} TextGrid files in {textgrid_dir}.\n")
@@ -410,37 +385,28 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
     for tg_path in tg_paths:
         session_name = os.path.splitext(os.path.basename(tg_path))[0]
         intervals = parse_textgrid(tg_path)
-        conv_idx, was_ambiguous, debug = match_textgrid_to_conversation(
-            intervals, conversations,
-            filename_topic=extract_topic_number_from_filename(session_name),
-            filename_mic=extract_mic_from_filename(session_name),
-        )
+        filename_mic = extract_mic_from_filename(session_name)
 
-        if conv_idx is None:
-            reports.append({"session": session_name, "n_compared": 0,
-                             "n_mismatches": 0,
-                             "issues": ["No conversation with a matching exact speaker set found in parquet."]})
+        parquet_rows = find_matching_window(rows, intervals, filename_mic=filename_mic)
+
+        if parquet_rows is None:
+            best_start, best_mismatches = find_best_partial_window(rows, intervals, filename_mic=filename_mic)
+            reports.append({
+                "session": session_name, "n_compared": 0, "n_mismatches": 0,
+                "issues": [f"No exact-match window found. Best partial match: "
+                           f"start_row={best_start}, mismatches={best_mismatches}/{len(intervals)} "
+                           f"— needs manual inspection."],
+            })
             continue
 
-        parquet_rows = conversations[conv_idx]
         report = check_alignment(intervals, parquet_rows, session_name)
-        if was_ambiguous:
-            report["issues"].insert(
-                0, f"NOTE: multiple parquet blocks shared this exact speaker "
-                   f"set; mic/topic disambiguation did not resolve to exactly "
-                   f"one match — falling back to content similarity. "
-                   f"Debug: filename_mic={debug.get('filename_mic')}, "
-                   f"mic_matches={debug.get('mic_matches')}, "
-                   f"filename_topic={debug.get('filename_topic')}, "
-                   f"candidate_topics={debug.get('candidate_topics')}"
-            )
         reports.append(report)
-
+ 
         if report["n_mismatches"] == 0 and not any(
             "Count mismatch" in issue for issue in report["issues"]
         ):
             attach_timestamps(parquet_rows, intervals)
-
+ 
     print("=== Alignment summary ===")
     ok_count = 0
     for r in reports:
@@ -450,7 +416,7 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
         print(f"{r['session']}: {status}  ({r['n_compared']} rows compared)")
         for issue in r["issues"]:
             print(f"    {issue}")
-
+ 
     print(f"\n{ok_count}/{len(reports)} sessions aligned cleanly.")
     return reports
 
