@@ -371,9 +371,32 @@ def run_vad_on_interval(audio_path, xmin, xmax):
 
 # ---------- Main ----------
 
-def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
-    print(f"Loading parquet dataset ({parquet_source}, split={dataset_split})...")
-    ds = load_dataset(parquet_source, split=dataset_split, token=HF_TOKEN)
+def load_all_splits(parquet_source, token, splits=("train", "validation", "test")):
+    """Load and concatenate all named splits into one row list, tagging
+    each row with its originating split (_split). TextGrid filenames
+    don't indicate which split a session belongs to, so the search needs
+    the full combined row space rather than guessing per-file. The split
+    tag is kept on each row afterward for later use — e.g. verifying no
+    single session ends up split across train/validation/test."""
+    all_rows = []
+    for split in splits:
+        try:
+            ds = load_dataset(parquet_source, split=split, token=token)
+        except Exception as e:
+            print(f"  (skipping split '{split}': {e})")
+            continue
+        if "audio" in ds.column_names:
+            ds = ds.remove_columns(["audio"])
+        for i, r in enumerate(ds):
+            all_rows.append(dict(r, _orig_index=i, _split=split))
+        print(f"  loaded {len(ds)} rows from split '{split}'")
+    return all_rows
+
+def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
+    print(f"Loading parquet dataset ({parquet_source}), all splits...")
+    rows = load_all_splits(parquet_source, HF_TOKEN)
+    print(f"Loaded {len(rows)} rows total.\n")
+    ds = load_dataset(parquet_source, token=HF_TOKEN)
     # Drop the audio column: this script only needs speaker_id/sentence, and
     # iterating with the audio column present forces every row to be decoded
     # (requiring torchcodec/FFmpeg) for no benefit here.
@@ -404,7 +427,7 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
             continue
 
         report = check_alignment(intervals, parquet_rows, session_name)
-        reports.append(report)
+        report["split"] = parquet_rows[0]["_split"]
  
         if report["n_mismatches"] == 0 and not any(
             "Count mismatch" in issue for issue in report["issues"]
@@ -415,9 +438,8 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
     ok_count = 0
     for r in reports:
         status = "OK" if not r["issues"] else f"ISSUES ({r['n_mismatches']} mismatches)"
-        if not r["issues"]:
-            ok_count += 1
-        print(f"{r['session']}: {status}  ({r['n_compared']} rows compared)")
+        split_tag = f" [{r['split']}]" if r.get("split") else ""
+        print(f"{r['session']}{split_tag}: {status}  ({r['n_compared']} rows compared)")
         for issue in r["issues"]:
             print(f"    {issue}")
  
@@ -428,7 +450,6 @@ def main(textgrid_dir, dataset_split="train", parquet_source="nectec/LOTUSDIS"):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("textgrid_dir", help="Directory containing .TextGrid files")
-    parser.add_argument("--split", default="train")
     parser.add_argument("--parquet-source", default="nectec/LOTUSDIS")
     args = parser.parse_args()
     main(args.textgrid_dir, dataset_split=args.split, parquet_source=args.parquet_source)
