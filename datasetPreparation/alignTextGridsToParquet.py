@@ -86,14 +86,15 @@ def parse_textgrid(path):
 def strip_tags(text):
     """Normalize for text-content comparison: remove <n>/<unk>/<td>/<sil>
     tags (including combined forms like <n>+<unk>), unwrap bracket markup
-    like [M]/[F]/[TOPIC] to their bare word, unwrap #...# emphasis markers,
-    strip % disfluency/repetition markers, strip ALL whitespace (TextGrid
-    keeps syllable-level spaces the parquet transcript doesn't), and
-    lowercase (parquet uses 'Topic', TextGrid uses '[TOPIC]')."""
+    like [M]/[F]/[TOPIC] to their bare word, strip # and % markers
+    (emphasis/disfluency — not reliably used in matched pairs, so
+    stripped outright rather than unwrapped as spans), strip ALL
+    whitespace (TextGrid keeps syllable-level spaces the parquet
+    transcript doesn't), and lowercase (parquet uses 'Topic', TextGrid
+    uses '[TOPIC]')."""
     text = re.sub(r'(<[^>]+>)(\+<[^>]+>)*', '', text)
     text = re.sub(r'\[([^\]]+)\]', r'\1', text)
-    text = re.sub(r'#([^#]*)#', r'\1', text)
-    text = text.replace('%', '')
+    text = text.replace('#', '').replace('%', '')
     text = re.sub(r'\s+', '', text)
     return text.strip().lower()
 
