@@ -321,8 +321,11 @@ def check_alignment(tg_intervals, parquet_rows, session_name, max_report=5):
         if tg_text != pq_text:
             mismatches += 1
             if mismatches <= max_report:
+                note = ""
+                if tg_text.startswith(pq_text) or pq_text.startswith(tg_text):
+                    note = " (one is a prefix of the other — likely truncation, not misalignment)"
                 issues.append(
-                    f"Row {i}: text differs after tag-stripping.\n"
+                    f"Row {i}: text differs after tag-stripping.{note}\n"
                     f"    TextGrid: {tg_text[:60]!r}\n"
                     f"    Parquet : {pq_text[:60]!r}"
                 )
