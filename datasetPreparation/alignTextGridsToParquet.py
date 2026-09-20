@@ -240,6 +240,58 @@ def find_first_divergence(rows_ordered, tg_intervals, filename_mic=None):
     )
     return best_start, best_mismatches, first_divergence
 
+def align_with_indels(tg_seq, pq_seq, match_fn=speaker_sets_match, gap_cost=1):
+    """Global alignment (Needleman-Wunsch) between two speaker-set
+    sequences, tolerating insertions/deletions on either side — needed
+    because some sessions have a genuine row-count mismatch between
+    TextGrid and parquet (an utterance present in one source but not the
+    other), which no fixed-length window comparison can ever satisfy.
+    Returns (total_cost, alignment), where alignment is a list of
+    (tg_idx_or_None, pq_idx_or_None) pairs; a None on either side marks a
+    row with no counterpart on the other side (an indel)."""
+    n, m = len(tg_seq), len(pq_seq)
+    dp = [[0] * (m + 1) for _ in range(n + 1)]
+    for i in range(1, n + 1):
+        dp[i][0] = i * gap_cost
+    for j in range(1, m + 1):
+        dp[0][j] = j * gap_cost
+    for i in range(1, n + 1):
+        for j in range(1, m + 1):
+            sub_cost = 0 if match_fn(tg_seq[i - 1], pq_seq[j - 1]) else 1
+            dp[i][j] = min(
+                dp[i - 1][j - 1] + sub_cost,
+                dp[i - 1][j] + gap_cost,
+                dp[i][j - 1] + gap_cost,
+            )
+    i, j, alignment = n, m, []
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and dp[i][j] == dp[i - 1][j - 1] + (
+            0 if match_fn(tg_seq[i - 1], pq_seq[j - 1]) else 1
+        ):
+            alignment.append((i - 1, j - 1)); i -= 1; j -= 1
+        elif i > 0 and dp[i][j] == dp[i - 1][j] + gap_cost:
+            alignment.append((i - 1, None)); i -= 1
+        else:
+            alignment.append((None, j - 1)); j -= 1
+    alignment.reverse()
+    return dp[n][m], alignment
+
+
+def attempt_indel_tolerant_match(rows_ordered, tg_intervals, filename_mic, best_start, margin=15):
+    """Fallback used only when a strict fixed-length window fails but the
+    best partial match was already close (see main()) — re-aligns a
+    padded slice around best_start against the TextGrid, permitting a
+    small number of indels. Returns (cost, alignment, candidate_rows)."""
+    if filename_mic is not None:
+        rows_ordered = [r for r in rows_ordered if r["mic"].lower() == filename_mic]
+    lo = max(0, best_start - 5)
+    hi = best_start + len(tg_intervals) + margin
+    candidate_rows = rows_ordered[lo:hi]
+    tg_seq = [frozenset(iv["speakers"]) for iv in tg_intervals]
+    pq_seq = [frozenset(get_speakers(r["speaker_id"])) for r in candidate_rows]
+    cost, alignment = align_with_indels(tg_seq, pq_seq)
+    return cost, alignment, candidate_rows
+
 # ---------- Step 3: Match a TextGrid file to its parquet conversation ----------
 
 def match_textgrid_to_conversation(tg_intervals, conversations, filename_topic=None, filename_mic=None):
@@ -435,12 +487,28 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
             best_start, best_mismatches, first_divergence = find_first_divergence(
                 rows, intervals, filename_mic=filename_mic
             )
-            reports.append({
-                "session": session_name, "n_compared": 0, "n_mismatches": 0,
-                "issues": [f"No exact-match window found. Best partial match: "
-                           f"start_row={best_start}, mismatches={best_mismatches}/{len(intervals)}, "
-                           f"first_divergence_at_row={first_divergence} — needs manual inspection."],
-            })
+            cost, alignment, candidate_rows = attempt_indel_tolerant_match(
+                rows, intervals, filename_mic, best_start
+            )
+            n_indels = sum(1 for tg_i, pq_j in alignment if tg_i is None or pq_j is None)
+            if cost <= 5:  # low residual cost -> genuine match modulo a few indels
+                aligned_rows = [candidate_rows[pq_j] for tg_i, pq_j in alignment if pq_j is not None]
+                indel_positions = [tg_i for tg_i, pq_j in alignment if pq_j is None]
+                reports.append({
+                    "session": session_name, "n_compared": len(alignment), "n_mismatches": 0,
+                    "issues": [f"Matched via indel-tolerant alignment: cost={cost}, "
+                               f"{n_indels} indel(s) at TextGrid row(s) {indel_positions}. "
+                               f"Row-for-row timestamp attachment needs the indel positions "
+                               f"accounted for — do not assume a simple 1:1 index mapping."],
+                })
+            else:
+                reports.append({
+                    "session": session_name, "n_compared": 0, "n_mismatches": 0,
+                    "issues": [f"No exact-match window found. Best partial match: "
+                               f"start_row={best_start}, mismatches={best_mismatches}/{len(intervals)}, "
+                               f"first_divergence_at_row={first_divergence}. Indel-tolerant alignment "
+                               f"also failed (cost={cost}) — needs manual inspection."],
+                })
             continue
 
         report = check_alignment(intervals, parquet_rows, session_name)
