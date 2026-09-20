@@ -497,12 +497,15 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
             n_indels = sum(1 for tg_i, pq_j in alignment if tg_i is None or pq_j is None)
             if cost <= 5:  # low residual cost -> genuine match modulo a few indels
                 aligned_rows = [candidate_rows[pq_j] for tg_i, pq_j in alignment if pq_j is not None]
-                indel_positions = [tg_i for tg_i, pq_j in alignment if pq_j is None]
+                extra_parquet = [pq_j for tg_i, pq_j in alignment if tg_i is None]
+                extra_textgrid = [tg_i for tg_i, pq_j in alignment if pq_j is None]
                 reports.append({
                     "session": session_name, "n_compared": len(alignment), "n_mismatches": 0,
-                    "issues": [f"Matched via indel-tolerant alignment: cost={cost}, "
-                               f"{n_indels} indel(s) at TextGrid row(s) {indel_positions}. "
-                               f"Row-for-row timestamp attachment needs the indel positions "
+                    "issues": [f"Matched via indel-tolerant alignment: cost={cost}. "
+                               f"Extra parquet row(s) with no TextGrid counterpart at local "
+                               f"window index {extra_parquet}. Extra TextGrid interval(s) with "
+                               f"no parquet counterpart at TextGrid row {extra_textgrid}. "
+                               f"Row-for-row timestamp attachment needs these positions "
                                f"accounted for — do not assume a simple 1:1 index mapping."],
                 })
             else:
