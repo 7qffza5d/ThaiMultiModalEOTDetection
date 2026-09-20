@@ -174,36 +174,32 @@ def extract_mic_from_filename(filename):
 def get_speakers(speaker_id_str):
     return speaker_id_str.split("&")
 
+def speaker_sets_match(a, b):
+    """Compare two speaker sets for one row-position. If both sides are
+    single-speaker, require exact equality (unambiguous — should never
+    legitimately differ). If either side reflects an overlap (more than
+    one speaker), only require at least one shared speaker, since
+    TextGrid and parquet are known to sometimes disagree on which
+    speakers get credited during overlapping speech (e.g. dominant
+    speaker only vs. all overlapping speakers)."""
+    if len(a) == 1 and len(b) == 1:
+        return a == b
+    return bool(a & b)
 
 def find_matching_window(rows_ordered, tg_intervals, filename_mic=None):
-    """Search rows_ordered (parquet rows in original split order) for a
-    contiguous window whose per-row speaker set sequence matches the
-    TextGrid's speaker sequence EXACTLY, row-for-row. This replaces
-    heuristic conversation segmentation entirely: rather than trying to
-    correctly carve the whole dataset into conversations (fragile — see
-    the cascading merge failures this was built to fix), it directly
-    locates where one specific session lives in the row stream.
-
-    Pre-filtering to filename_mic narrows the search a lot, since mic is
-    constant within a session. Returns the matched list of rows, or None
-    if no exact match exists anywhere."""
     if filename_mic is not None:
         rows_ordered = [r for r in rows_ordered if r["mic"].lower() == filename_mic]
-
     tg_seq = [frozenset(iv["speakers"]) for iv in tg_intervals]
     n = len(tg_seq)
     row_seq = [frozenset(get_speakers(r["speaker_id"])) for r in rows_ordered]
 
     for start in range(len(row_seq) - n + 1):
-        if row_seq[start] == tg_seq[0] and row_seq[start:start + n] == tg_seq:
+        if all(speaker_sets_match(row_seq[start + i], tg_seq[i]) for i in range(n)):
             return rows_ordered[start:start + n]
     return None
 
 
 def find_best_partial_window(rows_ordered, tg_intervals, filename_mic=None):
-    """Diagnostic only, used when find_matching_window fails: finds the
-    start position with the fewest per-row speaker mismatches, so a
-    failure can be inspected rather than silently guessed at."""
     if filename_mic is not None:
         rows_ordered = [r for r in rows_ordered if r["mic"].lower() == filename_mic]
     tg_seq = [frozenset(iv["speakers"]) for iv in tg_intervals]
@@ -212,11 +208,33 @@ def find_best_partial_window(rows_ordered, tg_intervals, filename_mic=None):
 
     best_start, best_mismatches = None, n + 1
     for start in range(len(row_seq) - n + 1):
-        mismatches = sum(1 for a, b in zip(row_seq[start:start + n], tg_seq) if a != b)
+        mismatches = sum(1 for a, b in zip(row_seq[start:start + n], tg_seq)
+                          if not speaker_sets_match(a, b))
         if mismatches < best_mismatches:
             best_start, best_mismatches = start, mismatches
     return best_start, best_mismatches
 
+
+def find_first_divergence(rows_ordered, tg_intervals, filename_mic=None):
+    if filename_mic is not None:
+        rows_ordered = [r for r in rows_ordered if r["mic"].lower() == filename_mic]
+    tg_seq = [frozenset(iv["speakers"]) for iv in tg_intervals]
+    n = len(tg_seq)
+    row_seq = [frozenset(get_speakers(r["speaker_id"])) for r in rows_ordered]
+
+    best_start, best_mismatches = None, n + 1
+    for start in range(len(row_seq) - n + 1):
+        mismatches = sum(1 for a, b in zip(row_seq[start:start + n], tg_seq)
+                          if not speaker_sets_match(a, b))
+        if mismatches < best_mismatches:
+            best_start, best_mismatches = start, mismatches
+
+    first_divergence = next(
+        (i for i, (a, b) in enumerate(zip(row_seq[best_start:best_start + n], tg_seq))
+         if not speaker_sets_match(a, b)),
+        None,
+    )
+    return best_start, best_mismatches, first_divergence
 
 # ---------- Step 3: Match a TextGrid file to its parquet conversation ----------
 
@@ -294,6 +312,7 @@ def match_textgrid_to_conversation(tg_intervals, conversations, filename_topic=N
 
     best_idx = min(candidates, key=score)
     return best_idx, True, debug
+
 
 
 # ---------- Step 4: Alignment verification ----------
@@ -396,14 +415,6 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
     print(f"Loading parquet dataset ({parquet_source}), all splits...")
     rows = load_all_splits(parquet_source, HF_TOKEN)
     print(f"Loaded {len(rows)} rows total.\n")
-    ds = load_dataset(parquet_source, token=HF_TOKEN)
-    # Drop the audio column: this script only needs speaker_id/sentence, and
-    # iterating with the audio column present forces every row to be decoded
-    # (requiring torchcodec/FFmpeg) for no benefit here.
-    if "audio" in ds.column_names:
-        ds = ds.remove_columns(["audio"])
-    rows = [dict(r, _orig_index=i) for i, r in enumerate(ds)]
-    print(f"Loaded {len(rows)} rows from parquet.\n")
 
     tg_paths = sorted(glob.glob(os.path.join(textgrid_dir, "*.TextGrid")))
     print(f"Found {len(tg_paths)} TextGrid files in {textgrid_dir}.\n")
@@ -417,12 +428,14 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
         parquet_rows = find_matching_window(rows, intervals, filename_mic=filename_mic)
 
         if parquet_rows is None:
-            best_start, best_mismatches = find_best_partial_window(rows, intervals, filename_mic=filename_mic)
+            best_start, best_mismatches, first_divergence = find_first_divergence(
+                rows, intervals, filename_mic=filename_mic
+            )
             reports.append({
                 "session": session_name, "n_compared": 0, "n_mismatches": 0,
                 "issues": [f"No exact-match window found. Best partial match: "
-                           f"start_row={best_start}, mismatches={best_mismatches}/{len(intervals)} "
-                           f"— needs manual inspection."],
+                           f"start_row={best_start}, mismatches={best_mismatches}/{len(intervals)}, "
+                           f"first_divergence_at_row={first_divergence} — needs manual inspection."],
             })
             continue
 
@@ -452,4 +465,4 @@ if __name__ == "__main__":
     parser.add_argument("textgrid_dir", help="Directory containing .TextGrid files")
     parser.add_argument("--parquet-source", default="nectec/LOTUSDIS")
     args = parser.parse_args()
-    main(args.textgrid_dir, dataset_split=args.split, parquet_source=args.parquet_source)
+    main(args.textgrid_dir, parquet_source=args.parquet_source)
