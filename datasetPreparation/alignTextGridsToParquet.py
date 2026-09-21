@@ -18,6 +18,7 @@ Assumes:
 
 import re
 import os
+import csv
 import glob
 import argparse
 from collections import defaultdict
@@ -417,6 +418,68 @@ def check_alignment(tg_intervals, parquet_rows, session_name, max_report=5):
         "issues": issues,
     }
 
+# ---------- Step 4.5: Logging discrepencies ------------
+def log_discrepancies_from_alignment(alignment, tg_intervals, candidate_rows, session_name, discrepancy_log):
+    """Record every discrepancy in a (tg_idx, pq_idx) alignment — indels
+    (either side None) and speaker/text substitutions — into
+    discrepancy_log, a shared list of dicts, for later review. This is
+    the concrete input for finalizing the overlap-audit rule (project
+    methodology section 1.5): every row where TextGrid and parquet
+    disagree on who was speaking during overlap shows up here, rather
+    than being capped at the first few printed to console."""
+    for tg_i, pq_j in alignment:
+        if tg_i is None:
+            row = candidate_rows[pq_j]
+            discrepancy_log.append({
+                "session": session_name, "row_index": pq_j,
+                "type": "extra_parquet_row",
+                "tg_speakers": "", "pq_speakers": row["speaker_id"],
+                "tg_text": "", "pq_text": row["sentence"],
+            })
+            continue
+        if pq_j is None:
+            iv = tg_intervals[tg_i]
+            discrepancy_log.append({
+                "session": session_name, "row_index": tg_i,
+                "type": "extra_textgrid_interval",
+                "tg_speakers": "&".join(iv["speakers"]), "pq_speakers": "",
+                "tg_text": iv["clean_text"], "pq_text": "",
+            })
+            continue
+
+        iv, row = tg_intervals[tg_i], candidate_rows[pq_j]
+        tg_sp, pq_sp = set(iv["speakers"]), set(get_speakers(row["speaker_id"]))
+        tg_text, pq_text = strip_tags(iv["clean_text"]), strip_tags(row["sentence"])
+
+        if tg_sp != pq_sp:
+            dtype = "speaker_attribution"
+        elif tg_text != pq_text:
+            dtype = "prefix_truncation" if (tg_text.startswith(pq_text) or pq_text.startswith(tg_text)) else "text_mismatch"
+        else:
+            continue  # exact match at this position, nothing to log
+
+        discrepancy_log.append({
+            "session": session_name, "row_index": tg_i, "type": dtype,
+            "tg_speakers": "&".join(sorted(tg_sp)), "pq_speakers": "&".join(sorted(pq_sp)),
+            "tg_text": iv["clean_text"], "pq_text": row["sentence"],
+        })
+
+
+def write_discrepancy_log(discrepancy_log, path="discrepancy_log.csv"):
+    if not discrepancy_log:
+        print("No discrepancies logged.")
+        return
+    fieldnames = ["session", "row_index", "type", "tg_speakers", "pq_speakers", "tg_text", "pq_text"]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(discrepancy_log)
+
+    from collections import Counter
+    counts = Counter(d["type"] for d in discrepancy_log)
+    print(f"\nWrote {len(discrepancy_log)} discrepancy rows to {path}")
+    for dtype, n in counts.most_common():
+        print(f"  {dtype}: {n}")
 
 # ---------- Step 5: Attach real timestamps once alignment is confirmed ----------
 
@@ -480,6 +543,7 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
     print(f"Found {len(tg_paths)} TextGrid files in {textgrid_dir}.\n")
 
     reports = []
+    discrepancy_log = []
     for tg_path in tg_paths:
         session_name = os.path.splitext(os.path.basename(tg_path))[0]
         intervals = parse_textgrid(tg_path)
@@ -499,6 +563,7 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
                 aligned_rows = [candidate_rows[pq_j] for tg_i, pq_j in alignment if pq_j is not None]
                 extra_parquet = [pq_j for tg_i, pq_j in alignment if tg_i is None]
                 extra_textgrid = [tg_i for tg_i, pq_j in alignment if pq_j is None]
+                log_discrepancies_from_alignment(alignment, intervals, candidate_rows, session_name, discrepancy_log)
                 reports.append({
                     "session": session_name, "n_compared": len(alignment), "n_mismatches": 0,
                     "issues": [f"Matched via indel-tolerant alignment: cost={cost}. "
@@ -520,6 +585,10 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
 
         report = check_alignment(intervals, parquet_rows, session_name)
         report["split"] = parquet_rows[0]["_split"]
+        log_discrepancies_from_alignment(
+            [(i, i) for i in range(len(parquet_rows))], intervals, parquet_rows,
+            session_name, discrepancy_log,
+        )
  
         if report["n_mismatches"] == 0 and not any(
             "Count mismatch" in issue for issue in report["issues"]
@@ -536,6 +605,7 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
             print(f"    {issue}")
  
     print(f"\n{ok_count}/{len(reports)} sessions aligned cleanly.")
+    write_discrepancy_log(discrepancy_log)
     return reports
 
 
