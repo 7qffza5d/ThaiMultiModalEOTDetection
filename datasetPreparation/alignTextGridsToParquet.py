@@ -461,6 +461,30 @@ def log_discrepancies_from_alignment(alignment, tg_intervals, candidate_rows, se
             "tg_text": iv["clean_text"], "pq_text": row["sentence"],
         })
 
+def reclassify_boundary_shifts(discrepancy_log):
+    """Section 4.1 overlap-rule finding: some 'speaker_attribution' rows
+    aren't a disagreement about WHO overlapped, only about WHICH of two
+    consecutive rows the overlap is attached to. When two adjacent
+    speaker_attribution entries in the same session cleanly swap
+    (tg[i]==pq[i+1] and pq[i]==tg[i+1]), relabel both as
+    'speaker_attribution_boundary_shift' so they're separated from the
+    genuine case-by-case remainder that still needs manual audit."""
+    def clean_set(s):
+        return frozenset(p for p in re.split(r'[&%]', s) if p)
+
+    by_key = {
+        (d["session"], d["row_index"]): d
+        for d in discrepancy_log if d["type"] == "speaker_attribution"
+    }
+    for (session, idx), d in by_key.items():
+        nxt = by_key.get((session, idx + 1))
+        if nxt is None:
+            continue
+        if (clean_set(d["tg_speakers"]) == clean_set(nxt["pq_speakers"]) and
+                clean_set(d["pq_speakers"]) == clean_set(nxt["tg_speakers"])):
+            d["type"] = "speaker_attribution_boundary_shift"
+            nxt["type"] = "speaker_attribution_boundary_shift"
+    return discrepancy_log
 
 def write_discrepancy_log(discrepancy_log, path="discrepancy_log.csv"):
     if not discrepancy_log:
@@ -582,6 +606,8 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
 
         report = check_alignment(intervals, parquet_rows, session_name)
         report["split"] = parquet_rows[0]["_split"]
+        discrepancy_log = reclassify_boundary_shifts(discrepancy_log)
+        write_discrepancy_log(discrepancy_log)
         log_discrepancies_from_alignment(
             [(i, i) for i in range(len(parquet_rows))], intervals, parquet_rows,
             session_name, discrepancy_log,
