@@ -77,7 +77,7 @@ def parse_textgrid(path):
         intervals.append({
             "xmin": float(xmin),
             "xmax": float(xmax),
-            "speakers": speaker_field.split("&"),
+            "speakers": [s for s in speaker_field.split("&") if s],
             "raw_text": text,
             "clean_text": clean_text.strip(),
         })
@@ -173,11 +173,8 @@ def extract_mic_from_filename(filename):
 # ---------- Step 2: Parquet-side conversation reconstruction ----------
 
 def get_speakers(speaker_id_str):
-    # Defensive: at least one row has the Thai Baht sign (฿) in place of
-    # the intended '&' delimiter — likely a data-entry slip, since the
-    # two characters sit in similar positions on some keyboard layouts.
     speaker_id_str = speaker_id_str.replace("฿", "&")
-    return speaker_id_str.split("&")
+    return [s for s in speaker_id_str.split("&") if s]
 
 def speaker_sets_match(a, b):
     """Compare two speaker sets for one row-position. If both sides are
