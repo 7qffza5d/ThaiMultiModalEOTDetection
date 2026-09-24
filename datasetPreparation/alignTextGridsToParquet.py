@@ -484,7 +484,7 @@ def log_discrepancies_from_alignment(alignment, tg_intervals, candidate_rows, se
             discrepancy_log.append({
                 "session": session_name, "row_index": pq_j,
                 "type": "extra_parquet_row",
-                "tg_speakers": "", "pq_speakers": row["speaker_id"],
+                "tg_speakers": "", "pq_speakers": "&".join(sorted(get_speakers(row["speaker_id"]))),
                 "tg_text": "", "pq_text": row["sentence"],
             })
             continue
