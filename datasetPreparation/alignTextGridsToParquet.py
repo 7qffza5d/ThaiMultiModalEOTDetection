@@ -177,17 +177,51 @@ def get_speakers(speaker_id_str):
     speaker_id_str = speaker_id_str.replace("฿", "&")
     return [s for s in speaker_id_str.split("&") if s]
 
-def speaker_sets_match(a, b):
+TEXT_SIMILARITY_THRESHOLD = 0.6  # see text_similar(); calibrated against
+# S050/S058's confirmed content-shifted rows, whose ratios topped out at
+# 0.571 (row 88) — genuine matches are expected well above this since
+# strip_tags already normalizes tokenization differences.
+
+def text_similar(tg_text, pq_text, threshold=TEXT_SIMILARITY_THRESHOLD):
+    """Coarse content-similarity check, used only as a tiebreaker inside
+    speaker_sets_match's overlap branch — never as a standalone match
+    criterion. Distinguishes a genuine overlap-crediting disagreement
+    (same underlying utterance, different speaker credit) from an indel
+    that happens to preserve speaker overlap with its neighbors (different
+    utterance entirely, same speakers still active nearby). Compares on
+    strip_tags-normalized text since TextGrid and parquet tokenize
+    differently (syllable-spaced vs. continuous)."""
+    a, b = strip_tags(tg_text), strip_tags(pq_text)
+    if not a or not b:
+        return True  # nothing to compare against; don't penalize on missing text
+    return SequenceMatcher(None, a, b).ratio() >= threshold
+
+
+def speaker_sets_match(a, b, tg_text=None, pq_text=None):
     """Compare two speaker sets for one row-position. If both sides are
     single-speaker, require exact equality (unambiguous — should never
     legitimately differ). If either side reflects an overlap (more than
-    one speaker), only require at least one shared speaker, since
+    one speaker), the sets must share at least one speaker, since
     TextGrid and parquet are known to sometimes disagree on which
     speakers get credited during overlapping speech (e.g. dominant
-    speaker only vs. all overlapping speakers)."""
+    speaker only vs. all overlapping speakers) — but that alone used to
+    be treated as a free match regardless of content, which let
+    fitting_align silently walk through indels whenever the shifted rows
+    still happened to share a speaker with their neighbors (near-certain
+    in a 2-3 person conversation; confirmed empirically in S050/S058,
+    where 13/13 and 28/29 of the resulting discrepancy rows would have
+    passed the old check). When text is supplied, it's used as a
+    tiebreaker so a real content shift isn't masked by coincidental
+    speaker overlap; with no text supplied, this falls back to the old,
+    overlap-only behavior (used by the coarse window-search functions
+    below, which don't have per-position text lined up to compare)."""
     if len(a) == 1 and len(b) == 1:
         return a == b
-    return bool(a & b)
+    if not (a & b):
+        return False
+    if tg_text is not None and pq_text is not None:
+        return text_similar(tg_text, pq_text)
+    return True
 
 def find_matching_window(rows_ordered, tg_intervals, filename_mic=None):
     if filename_mic is not None:
