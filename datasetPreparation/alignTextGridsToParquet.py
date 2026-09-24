@@ -174,7 +174,12 @@ def extract_mic_from_filename(filename):
 # ---------- Step 2: Parquet-side conversation reconstruction ----------
 
 def get_speakers(speaker_id_str):
-    speaker_id_str = speaker_id_str.replace("฿", "&")
+    # Defensive: some rows use '฿' or '%' in place of the intended '&'
+    # delimiter between overlapping speaker IDs — likely data-entry
+    # slips (e.g. "F31&M26%M25" instead of "F31&M26&M25"). Neither
+    # character otherwise appears in a valid speaker ID, so blanket
+    # substitution is safe.
+    speaker_id_str = speaker_id_str.replace("฿", "&").replace("%", "&")
     return [s for s in speaker_id_str.split("&") if s]
 
 SPEAKER_CODE_SHAPED_RE = re.compile(r'^[mf]\d+([&,]\s*[mf]\d+)*,?$', re.IGNORECASE)
