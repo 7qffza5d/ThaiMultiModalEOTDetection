@@ -273,14 +273,22 @@ def find_first_divergence(rows_ordered, tg_intervals, filename_mic=None):
     )
     return best_start, best_mismatches, first_divergence
 
-def fitting_align(tg_seq, pq_seq, match_fn=speaker_sets_match, gap_cost=1):
+def fitting_align(tg_seq, pq_seq, match_fn=speaker_sets_match, gap_cost=1,
+                   tg_text_seq=None, pq_text_seq=None):
     """Semi-global ('fitting') alignment: tg_seq must be fully consumed,
     but pq_seq may be freely skipped at both the start and end with no
     penalty — only substitutions/indels WITHIN the matched region cost
     anything. This avoids the previous bug where padding the candidate
     window artificially inflated the cost floor to the padding size
     regardless of actual match quality. Returns (cost, alignment), where
-    alignment is a list of (tg_idx_or_None, pq_idx_or_None) pairs."""
+    alignment is a list of (tg_idx_or_None, pq_idx_or_None) pairs.
+
+    tg_text_seq/pq_text_seq, when supplied, run parallel to tg_seq/pq_seq
+    and get passed to match_fn alongside the speaker sets — this is what
+    lets an overlap-tolerant match_fn (speaker_sets_match) use text as a
+    tiebreaker instead of treating any shared-speaker overlap as free,
+    which previously let real indels go undetected whenever they
+    preserved speaker overlap with their neighbors."""
     n, m = len(tg_seq), len(pq_seq)
     dp = [[0] * (m + 1) for _ in range(n + 1)]
     back = [[None] * (m + 1) for _ in range(n + 1)]
@@ -291,7 +299,12 @@ def fitting_align(tg_seq, pq_seq, match_fn=speaker_sets_match, gap_cost=1):
         back[0][j] = "free"  # dp[0][j] stays 0: free leading skip
     for i in range(1, n + 1):
         for j in range(1, m + 1):
-            sub_cost = 0 if match_fn(tg_seq[i - 1], pq_seq[j - 1]) else 1
+            if tg_text_seq is not None and pq_text_seq is not None:
+                is_match = match_fn(tg_seq[i - 1], pq_seq[j - 1],
+                                     tg_text_seq[i - 1], pq_text_seq[j - 1])
+            else:
+                is_match = match_fn(tg_seq[i - 1], pq_seq[j - 1])
+            sub_cost = 0 if is_match else 1
             diag, up, left = dp[i - 1][j - 1] + sub_cost, dp[i - 1][j] + gap_cost, dp[i][j - 1] + gap_cost
             best = min(diag, up, left)
             dp[i][j] = best
