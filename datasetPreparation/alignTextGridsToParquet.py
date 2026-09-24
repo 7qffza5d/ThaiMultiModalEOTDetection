@@ -215,12 +215,16 @@ def speaker_sets_match(a, b, tg_text=None, pq_text=None):
     speaker overlap; with no text supplied, this falls back to the old,
     overlap-only behavior (used by the coarse window-search functions
     below, which don't have per-position text lined up to compare)."""
-    if len(a) == 1 and len(b) == 1:
-        return a == b
     if not (a & b):
-        return False
+        return False  # no shared speaker at all — never a match, regardless of text
     if tg_text is not None and pq_text is not None:
         return text_similar(tg_text, pq_text)
+    # no text available: fall back to speaker-only comparison (used by the
+    # coarse window-search functions, which don't have per-position text
+    # lined up) — single-speaker sides still require exact identity here,
+    # since that's the only signal available.
+    if len(a) == 1 and len(b) == 1:
+        return a == b
     return True
 
 def find_matching_window(rows_ordered, tg_intervals, filename_mic=None):
