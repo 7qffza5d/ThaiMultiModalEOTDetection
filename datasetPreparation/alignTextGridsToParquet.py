@@ -339,7 +339,9 @@ def attempt_indel_tolerant_match(rows_ordered, tg_intervals, filename_mic, best_
     candidate_rows = rows_ordered[lo:hi]
     tg_seq = [frozenset(iv["speakers"]) for iv in tg_intervals]
     pq_seq = [frozenset(get_speakers(r["speaker_id"])) for r in candidate_rows]
-    cost, alignment = fitting_align(tg_seq, pq_seq)
+    tg_text_seq = [iv["clean_text"] for iv in tg_intervals]
+    pq_text_seq = [r["sentence"] for r in candidate_rows]
+    cost, alignment = fitting_align(tg_seq, pq_seq, tg_text_seq=tg_text_seq, pq_text_seq=pq_text_seq)
     return cost, alignment, candidate_rows
 
 # ---------- Step 3: Match a TextGrid file to its parquet conversation ----------
