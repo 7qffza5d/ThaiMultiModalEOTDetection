@@ -177,6 +177,19 @@ def get_speakers(speaker_id_str):
     speaker_id_str = speaker_id_str.replace("฿", "&")
     return [s for s in speaker_id_str.split("&") if s]
 
+SPEAKER_CODE_SHAPED_RE = re.compile(r'^[mf]\d+([&,]\s*[mf]\d+)*,?$', re.IGNORECASE)
+
+def looks_like_speaker_code(text):
+    """True if normalized text is just a speaker-ID-shaped token (e.g.
+    'm29&f34' or 'm29&f34,') rather than real transcribed speech — a
+    sign the underlying interval/row content is a data artifact (a
+    malformed double speaker-tag, or a parquet sentence field that's a
+    placeholder), not a genuine discrepancy to resolve. See S062 row 60,
+    where a malformed TextGrid interval left 'm29&f34,' as its 'clean'
+    text and the matching parquet row's sentence field was itself just
+    'm29&f34' — both sides garbage, coincidentally almost identical."""
+    return bool(SPEAKER_CODE_SHAPED_RE.match(text))
+
 TEXT_SIMILARITY_THRESHOLD = 0.6  # see text_similar(); calibrated against
 # S050/S058's confirmed content-shifted rows, whose ratios topped out at
 # 0.571 (row 88) — genuine matches are expected well above this since
@@ -502,7 +515,9 @@ def log_discrepancies_from_alignment(alignment, tg_intervals, candidate_rows, se
         tg_sp, pq_sp = set(iv["speakers"]), set(get_speakers(row["speaker_id"]))
         tg_text, pq_text = strip_tags(iv["clean_text"]), strip_tags(row["sentence"])
 
-        if tg_sp != pq_sp:
+        if looks_like_speaker_code(tg_text) or looks_like_speaker_code(pq_text):
+            dtype = "placeholder_text_artifact"
+        elif tg_sp != pq_sp:
             dtype = "speaker_attribution"
         elif tg_text != pq_text:
             dtype = "prefix_truncation" if (tg_text.startswith(pq_text) or pq_text.startswith(tg_text)) else "text_mismatch"
