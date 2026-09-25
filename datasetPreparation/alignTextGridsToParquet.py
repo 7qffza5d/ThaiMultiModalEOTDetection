@@ -777,8 +777,8 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS", diagnose_session=None):
                 extra_parquet = [pq_j for tg_i, pq_j in alignment if tg_i is None]
                 extra_textgrid = [tg_i for tg_i, pq_j in alignment if pq_j is None]
                 log_discrepancies_from_alignment(alignment, intervals, candidate_rows, session_name, discrepancy_log)
-                if diagnose_session and session_name == diagnose_session:
-                    diagnose_stolen_pairings(alignment, intervals, candidate_rows, session_name)
+                session_rows = attach_timestamps_from_alignment(alignment, intervals, candidate_rows)
+                write_timestamped_session(session_name, session_rows)
                 reports.append({
                     "session": session_name, "n_compared": len(alignment), "n_mismatches": 0,
                     "issues": [f"Matched via indel-tolerant alignment: cost={cost}. "
@@ -810,7 +810,9 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS", diagnose_session=None):
         if report["n_mismatches"] == 0 and not any(
             "Count mismatch" in issue for issue in report["issues"]
         ):
-            attach_timestamps(parquet_rows, intervals)
+            clean_alignment = [(i, i) for i in range(len(parquet_rows))]
+            session_rows = attach_timestamps_from_alignment(clean_alignment, intervals, parquet_rows)
+            write_timestamped_session(session_name, session_rows)
  
     print("=== Alignment summary ===")
     ok_count = 0
