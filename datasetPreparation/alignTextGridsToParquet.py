@@ -366,6 +366,49 @@ def attempt_indel_tolerant_match(rows_ordered, tg_intervals, filename_mic, best_
     cost, alignment = fitting_align(tg_seq, pq_seq, tg_text_seq=tg_text_seq, pq_text_seq=pq_text_seq)
     return cost, alignment, candidate_rows
 
+def diagnose_stolen_pairings(alignment, tg_intervals, candidate_rows, session_name, threshold=0.6):
+    """Diagnostic only — writes nothing, fixes nothing. For every
+    extra_parquet_row in this session's alignment (a pq row with no
+    TextGrid counterpart), search ALL of tg_intervals for one whose text
+    actually matches it closely. If found, report what that TextGrid
+    interval is CURRENTLY paired with instead. This tests the 'stolen
+    pairing' hypothesis: the correct tg_i exists in the interval list,
+    but fitting_align assigned it to a different pq_j somewhere else in
+    the alignment, orphaning the real match rather than this row being
+    genuinely unresolvable. Call manually on a session of interest —
+    not wired into main()'s normal run."""
+    tg_to_pq = {tg_i: pq_j for tg_i, pq_j in alignment if tg_i is not None}
+    extra_pq = [pq_j for tg_i, pq_j in alignment if tg_i is None]
+
+    if not extra_pq:
+        print(f"{session_name}: no extra_parquet_row entries.")
+        return
+
+    for pq_j in extra_pq:
+        row = candidate_rows[pq_j]
+        pq_text_norm = strip_tags(row["sentence"])
+        pq_sp = set(get_speakers(row["speaker_id"]))
+        print(f"\n{session_name} — orphaned pq_row {pq_j}: \"{row['sentence'][:40]}...\" (speakers={pq_sp})")
+
+        found_candidate = False
+        for tg_i, iv in enumerate(tg_intervals):
+            tg_text_norm = strip_tags(iv["clean_text"])
+            ratio = SequenceMatcher(None, tg_text_norm, pq_text_norm).ratio()
+            if ratio >= threshold:
+                found_candidate = True
+                current_pq_j = tg_to_pq.get(tg_i)
+                if current_pq_j is None:
+                    current_desc = "currently UNPAIRED (logged as extra_textgrid_interval)"
+                else:
+                    current_desc = (f"currently paired with pq_row {current_pq_j}: "
+                                     f"\"{candidate_rows[current_pq_j]['sentence'][:40]}...\"")
+                same_sp = set(iv["speakers"]) == pq_sp
+                speaker_note = "same speakers" if same_sp else f"DIFFERENT speakers (tg={iv['speakers']})"
+                print(f"    -> matches tg_interval {tg_i} (similarity={ratio:.2f}, {speaker_note}); {current_desc}")
+
+        if not found_candidate:
+            print(f"    -> no TextGrid interval matches >= {threshold} similarity. Looks genuinely extra.")
+
 # ---------- Step 3: Match a TextGrid file to its parquet conversation ----------
 
 def match_textgrid_to_conversation(tg_intervals, conversations, filename_topic=None, filename_mic=None):
@@ -629,7 +672,7 @@ def load_all_splits(parquet_source, token, splits=("train", "validation", "test"
         print(f"  loaded {len(ds)} rows from split '{split}'")
     return all_rows
 
-def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
+def main(textgrid_dir, parquet_source="nectec/LOTUSDIS", diagnose_session=None):
     print(f"Loading parquet dataset ({parquet_source}), all splits...")
     rows = load_all_splits(parquet_source, HF_TOKEN)
     print(f"Loaded {len(rows)} rows total.\n")
@@ -659,6 +702,8 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS"):
                 extra_parquet = [pq_j for tg_i, pq_j in alignment if tg_i is None]
                 extra_textgrid = [tg_i for tg_i, pq_j in alignment if pq_j is None]
                 log_discrepancies_from_alignment(alignment, intervals, candidate_rows, session_name, discrepancy_log)
+                if diagnose_session and session_name == diagnose_session:
+                    diagnose_stolen_pairings(alignment, intervals, candidate_rows, session_name)
                 reports.append({
                     "session": session_name, "n_compared": len(alignment), "n_mismatches": 0,
                     "issues": [f"Matched via indel-tolerant alignment: cost={cost}. "
@@ -710,5 +755,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("textgrid_dir", help="Directory containing .TextGrid files")
     parser.add_argument("--parquet-source", default="nectec/LOTUSDIS")
+    parser.add_argument("--diagnose-session", default=None,
+                         help="Session name (e.g. Hijack_S046_T022_Con123) to run "
+                              "diagnose_stolen_pairings on instead of normal logging.")
     args = parser.parse_args()
-    main(args.textgrid_dir, parquet_source=args.parquet_source)
+    main(args.textgrid_dir, parquet_source=args.parquet_source, diagnose_session=args.diagnose_session)
