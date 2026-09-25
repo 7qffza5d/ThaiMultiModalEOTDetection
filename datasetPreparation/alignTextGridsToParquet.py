@@ -21,6 +21,7 @@ import os
 import csv
 import glob
 import argparse
+import pandas as pd
 from collections import defaultdict
 from difflib import SequenceMatcher
 from datasets import load_dataset
@@ -659,21 +660,41 @@ def write_no_speaker_attribution_log(no_speaker_log, path="no_speaker_attributio
 
 # ---------- Step 5: Attach real timestamps once alignment is confirmed ----------
 
-def attach_timestamps(parquet_rows, tg_intervals):
-    """Copy start/end times onto parquet rows. NOTE: intervals observed so
-    far are perfectly contiguous (no gap between xmax and the next xmin) —
-    pause information lives inside leading/trailing <n>/<sil> tags within
-    the interval text, not as a separate silent span. This attaches a
-    categorical padding flag rather than a continuous pause duration;
-    getting an actual pause length requires a VAD pass on the audio
-    within each interval (see run_vad_on_interval stub below)."""
-    for i, row in enumerate(parquet_rows):
-        iv = tg_intervals[i]
+def attach_timestamps_from_alignment(alignment, tg_intervals, pq_rows):
+    """Attach start_time/end_time using the (tg_i, pq_j) alignment pairs
+    directly, rather than assuming positional 1:1 correspondence -- the
+    old attach_timestamps did `tg_intervals[i]` for `pq_rows[i]`, which is
+    only correct when there are zero indels. Any session that went
+    through attempt_indel_tolerant_match needs this version.
+
+    Rows are excluded from the returned list (not given a null timestamp)
+    in two cases: (1) tg_i or pq_j is None -- an extra_parquet_row or
+    extra_textgrid_interval, where one side has nothing to draw a
+    timestamp from or attach one to; (2) the paired content is a
+    placeholder_text_artifact (speaker-code-shaped text standing in for
+    real content, e.g. S062's 'M29&f34') -- per decision, these have no
+    recoverable content on either side and aren't carried forward.
+
+    NOTE: intervals observed so far are perfectly contiguous (no gap
+    between xmax and the next xmin) -- pause information lives inside
+    leading/trailing <n>/<sil> tags within the interval text, not as a
+    separate silent span. This attaches a categorical padding flag rather
+    than a continuous pause duration; an actual pause length requires a
+    VAD pass on the audio within each interval (see run_vad_on_interval)."""
+    timestamped = []
+    for tg_i, pq_j in alignment:
+        if tg_i is None or pq_j is None:
+            continue
+        iv, row = tg_intervals[tg_i], pq_rows[pq_j]
+        tg_text, pq_text = strip_tags(iv["clean_text"]), strip_tags(row["sentence"])
+        if looks_like_speaker_code(tg_text) or looks_like_speaker_code(pq_text):
+            continue
         row["start_time"] = iv["xmin"]
         row["end_time"] = iv["xmax"]
         row["has_leading_pad"] = bool(re.match(r"^\s*<(n|sil)>", iv["raw_text"]))
         row["has_trailing_pad"] = bool(re.search(r"<(n|sil)>\s*$", iv["raw_text"]))
-    return parquet_rows
+        timestamped.append(row)
+    return timestamped
 
 
 def run_vad_on_interval(audio_path, xmin, xmax):
