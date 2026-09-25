@@ -48,7 +48,7 @@ INTERVAL_RE = re.compile(
     r'xmin\s*=\s*([\d.]+)\s*\n\s*xmax\s*=\s*([\d.]+)\s*\n\s*text\s*=\s*"(.*?)"',
     re.DOTALL,
 )
-SPEAKER_PREFIX_RE = re.compile(r'^([\w&]+),\s*(.*)$')
+SPEAKER_PREFIX_RE = re.compile(r'^([^,]+),\s*(.*)$', re.DOTALL)
 
 
 def parse_textgrid(path):
@@ -71,14 +71,23 @@ def parse_textgrid(path):
             continue
         m = SPEAKER_PREFIX_RE.match(text)
         if not m:
-            continue  # e.g. a bare "<n>" interval with no speaker
+            # A genuinely bare noise interval (e.g. "<n>") strips to
+            # nothing and stays silent. Anything else that fails to
+            # match here is exactly the failure mode that silently ate
+            # 4 real intervals across the corpus before we noticed via
+            # their orphaned parquet counterparts (S046/S050/S055/S058)
+            # -- surface it instead of assuming it's noise.
+            if strip_tags(text):
+                print(f"WARNING [{path}]: interval has content but no parseable "
+                      f"speaker prefix, dropped: {text[:60]!r}")
+            continue
         speaker_field, clean_text = m.groups()
         if not strip_tags(clean_text):
             continue  # speaker-tagged but purely noise/silence tags, no words
         intervals.append({
             "xmin": float(xmin),
             "xmax": float(xmax),
-            "speakers": [s for s in speaker_field.split("&") if s],
+            "speakers": get_speakers(speaker_field),  # reuse: handles '&'/'%'/'฿' and empty tokens consistently
             "raw_text": text,
             "clean_text": clean_text.strip(),
         })
