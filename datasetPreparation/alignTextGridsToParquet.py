@@ -696,6 +696,21 @@ def attach_timestamps_from_alignment(alignment, tg_intervals, pq_rows):
         timestamped.append(row)
     return timestamped
 
+def write_timestamped_session(session_name, rows, output_dir="timestamped"):
+    """Write one session's timestamped rows as both .parquet and .csv,
+    named after the session. No-op (with a note) if every row in this
+    session got excluded (no TG counterpart or placeholder artifact) --
+    should be rare post-fix, but possible."""
+    if not rows:
+        print(f"{session_name}: no timestamped rows to write (all excluded).")
+        return
+    os.makedirs(output_dir, exist_ok=True)
+    df = pd.DataFrame(rows)
+    parquet_path = os.path.join(output_dir, f"{session_name}.parquet")
+    csv_path = os.path.join(output_dir, f"{session_name}.csv")
+    df.to_parquet(parquet_path, index=False)
+    df.to_csv(csv_path, index=False, encoding="utf-8")
+    print(f"{session_name}: wrote {len(rows)} timestamped rows -> {parquet_path}, {csv_path}")
 
 def run_vad_on_interval(audio_path, xmin, xmax):
     """Stub for a follow-up step: given the full session audio and an
