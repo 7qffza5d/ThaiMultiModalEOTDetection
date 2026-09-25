@@ -49,9 +49,11 @@ INTERVAL_RE = re.compile(
     re.DOTALL,
 )
 SPEAKER_PREFIX_RE = re.compile(r'^([^,]+),\s*(.*)$', re.DOTALL)
+SPEAKER_CODE_START_RE = re.compile(r'^[MF]\d+')  # does the text open with a real speaker code?
+THAI_CHAR_RE = re.compile(r'[\u0E00-\u0E7F]')     # is there genuine Thai content, or just tag debris?
 
 
-def parse_textgrid(path):
+def parse_textgrid(path, no_speaker_log=None):
     """Return a list of speaker-tagged, content-bearing intervals: {xmin,
     xmax, speakers, raw_text, clean_text}. Two kinds of intervals are
     dropped, since neither appears to survive into the parquet transcript:
@@ -71,15 +73,30 @@ def parse_textgrid(path):
             continue
         m = SPEAKER_PREFIX_RE.match(text)
         if not m:
-            # A genuinely bare noise interval (e.g. "<n>") strips to
-            # nothing and stays silent. Anything else that fails to
-            # match here is exactly the failure mode that silently ate
-            # 4 real intervals across the corpus before we noticed via
-            # their orphaned parquet counterparts (S046/S050/S055/S058)
-            # -- surface it instead of assuming it's noise.
-            if strip_tags(text):
-                print(f"WARNING [{path}]: interval has content but no parseable "
-                      f"speaker prefix, dropped: {text[:60]!r}")
+            stripped = strip_tags(text)
+            if stripped:
+                # Distinguish three failure shapes we've now seen:
+                #  - S078: starts with a real speaker code, just space-
+                #    delimited instead of comma-delimited -> leave dropped,
+                #    still warn (decided: too risky to loosen the delimiter
+                #    rule further right now).
+                #  - S055: no speaker code, but also no real Thai content
+                #    once stripped (just malformed tag debris like '<n<')
+                #    -> leave dropped, still warn.
+                #  - S021: no speaker code AND genuine Thai words present
+                #    -> real content with no attribution at all. Flag
+                #    distinctly instead of silently dropping.
+                has_speaker_code_start = bool(SPEAKER_CODE_START_RE.match(text))
+                has_real_words = bool(THAI_CHAR_RE.search(stripped))
+                if not has_speaker_code_start and has_real_words:
+                    if no_speaker_log is not None:
+                        no_speaker_log.append({
+                            "session": os.path.splitext(os.path.basename(path))[0],
+                            "xmin": float(xmin), "xmax": float(xmax), "text": text,
+                        })
+                else:
+                    print(f"WARNING [{path}]: interval has content but no parseable "
+                          f"speaker prefix, dropped: {text[:60]!r}")
             continue
         speaker_field, clean_text = m.groups()
         if not strip_tags(clean_text):
@@ -628,6 +645,18 @@ def write_discrepancy_log(discrepancy_log, path="discrepancy_log.csv"):
     for dtype, n in counts.most_common():
         print(f"  {dtype}: {n}")
 
+def write_no_speaker_attribution_log(no_speaker_log, path="no_speaker_attribution.csv"):
+    if not no_speaker_log:
+        print("No no-speaker-attribution intervals flagged.")
+        return
+    fieldnames = ["session", "xmin", "xmax", "text"]
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(no_speaker_log)
+    print(f"\nWrote {len(no_speaker_log)} no-speaker-attribution interval(s) to {path} "
+          f"— excluded from alignment for now, decide handling later.")
+
 # ---------- Step 5: Attach real timestamps once alignment is confirmed ----------
 
 def attach_timestamps(parquet_rows, tg_intervals):
@@ -691,9 +720,10 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS", diagnose_session=None):
 
     reports = []
     discrepancy_log = []
+    no_speaker_log = []
     for tg_path in tg_paths:
         session_name = os.path.splitext(os.path.basename(tg_path))[0]
-        intervals = parse_textgrid(tg_path)
+        intervals = parse_textgrid(tg_path, no_speaker_log=no_speaker_log)
         filename_mic = extract_mic_from_filename(session_name)
 
         parquet_rows = find_matching_window(rows, intervals, filename_mic=filename_mic)
@@ -757,6 +787,7 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS", diagnose_session=None):
  
     print(f"\n{ok_count}/{len(reports)} sessions aligned cleanly.")
     write_discrepancy_log(discrepancy_log)
+    write_no_speaker_attribution_log(no_speaker_log)
     return reports
 
 
