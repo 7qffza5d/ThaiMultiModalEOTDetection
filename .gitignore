@@ -1,7 +1,5 @@
 .env
 
-/__pycache/*
-
 test.py
 
 discrepancy_log.csv
