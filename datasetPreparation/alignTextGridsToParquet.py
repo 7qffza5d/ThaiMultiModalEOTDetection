@@ -142,6 +142,17 @@ def compute_tag_density(clean_text):
     tag_tokens = sum(1 for t in tokens if TAG_TOKEN_RE.match(t))
     return tag_tokens / len(tokens)
 
+def count_tags_and_words(clean_text):
+    counts = {"n": 0, "unk": 0, "td": 0}
+    words = 0
+    for t in clean_text.split():
+        m = TAG_TOKEN_RE.match(t)
+        if m:
+            counts[m.group(1).lower()] += 1
+        else:
+            words += 1  # includes [PM]-style and #word# tokens; fine for a first pass
+    return counts, words
+
 # ---------- Thai number-word parsing (for topic-number disambiguation) ----------
 
 _DIGIT_VAL = {"ศูนย์": 0, "หนึ่ง": 1, "เอ็ด": 1, "สอง": 2, "สาม": 3, "สี่": 4,
@@ -706,6 +717,11 @@ def attach_timestamps_from_alignment(alignment, tg_intervals, pq_rows):
         row["start_time"] = iv["xmin"]
         row["end_time"] = iv["xmax"]
         row["tag_density"] = compute_tag_density(iv["clean_text"])
+        tag_counts, n_words = count_tags_and_words(iv["clean_text"])
+        row["n_noise_tags"] = tag_counts["n"]
+        row["n_unk_tags"] = tag_counts["unk"]
+        row["n_td_tags"] = tag_counts["td"]
+        row["n_words"] = n_words
         row["has_leading_pad"] = bool(re.match(r"^\s*<(n|sil)>", iv["raw_text"]))
         row["has_trailing_pad"] = bool(re.search(r"<(n|sil)>\s*$", iv["raw_text"]))
         timestamped.append(row)
