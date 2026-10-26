@@ -127,6 +127,20 @@ def strip_tags(text):
     text = re.sub(r'\s+', '', text)
     return text.strip().lower()
 
+TAG_TOKEN_RE = re.compile(r'^<(n|unk|td)>$', re.IGNORECASE)
+
+def compute_tag_density(clean_text):
+    """Fraction of whitespace-separated tokens in an interval's clean_text
+    (post-speaker-prefix, pre-strip_tags) that are exactly a <n>/<unk>/<td>
+    tag token, as opposed to a real word. Used to identify rows 'dominated
+    by' these tags per section 4.1 filtering. Returns None for a
+    zero-token interval (shouldn't occur for anything that survived the
+    noise filter in parse_textgrid, but defensive)."""
+    tokens = clean_text.split()
+    if not tokens:
+        return None
+    tag_tokens = sum(1 for t in tokens if TAG_TOKEN_RE.match(t))
+    return tag_tokens / len(tokens)
 
 # ---------- Thai number-word parsing (for topic-number disambiguation) ----------
 
@@ -691,6 +705,7 @@ def attach_timestamps_from_alignment(alignment, tg_intervals, pq_rows):
             continue
         row["start_time"] = iv["xmin"]
         row["end_time"] = iv["xmax"]
+        row["tag_density"] = compute_tag_density(iv["clean_text"])
         row["has_leading_pad"] = bool(re.match(r"^\s*<(n|sil)>", iv["raw_text"]))
         row["has_trailing_pad"] = bool(re.search(r"<(n|sil)>\s*$", iv["raw_text"]))
         timestamped.append(row)
