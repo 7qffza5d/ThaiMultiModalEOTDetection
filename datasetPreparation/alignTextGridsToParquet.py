@@ -53,6 +53,10 @@ SPEAKER_PREFIX_RE = re.compile(r'^([^,]+),\s*(.*)$', re.DOTALL)
 SPEAKER_CODE_START_RE = re.compile(r'^[MF]\d+')  # does the text open with a real speaker code?
 THAI_CHAR_RE = re.compile(r'[\u0E00-\u0E7F]')     # is there genuine Thai content, or just tag debris?
 
+# Discrepancy types that don't invalidate a 1:1 positional alignment:
+# prefix_truncation is a text-length difference on correctly paired rows, and
+# placeholder_text_artifact rows are skipped by attach_timestamps_from_alignment itself.
+TIMESTAMP_SAFE_DISCREPANCIES = {"prefix_truncation", "placeholder_text_artifact"}
 
 def parse_textgrid(path, no_speaker_log=None):
     """Return a list of speaker-tagged, content-bearing intervals: {xmin,
@@ -834,14 +838,16 @@ def main(textgrid_dir, parquet_source="nectec/LOTUSDIS", diagnose_session=None):
         report["split"] = parquet_rows[0]["_split"]
         discrepancy_log = reclassify_boundary_shifts(discrepancy_log)
         write_discrepancy_log(discrepancy_log)
+        n_log_before = len(discrepancy_log)
         log_discrepancies_from_alignment(
             [(i, i) for i in range(len(parquet_rows))], intervals, parquet_rows,
             session_name, discrepancy_log,
         )
- 
-        if report["n_mismatches"] == 0 and not any(
-            "Count mismatch" in issue for issue in report["issues"]
-        ):
+        new_discrepancies = discrepancy_log[n_log_before:]
+
+        no_count_mismatch = not any("Count mismatch" in issue for issue in report["issues"])
+        only_safe = all(d["type"] in TIMESTAMP_SAFE_DISCREPANCIES for d in new_discrepancies)
+        if no_count_mismatch and only_safe:
             clean_alignment = [(i, i) for i in range(len(parquet_rows))]
             session_rows = attach_timestamps_from_alignment(clean_alignment, intervals, parquet_rows)
             write_timestamped_session(session_name, session_rows)
