@@ -3,6 +3,7 @@
 timestamped/, to pick the section 4.1 filtering threshold from actual
 data rather than a guess. Run after re-generating timestamped/ with the
 tag_density field (see attach_timestamps_from_alignment)."""
+import os
 import glob
 import pandas as pd
 
@@ -15,7 +16,7 @@ def main(timestamped_dir="timestamped"):
     dfs = []
     for p in paths:
         df = pd.read_parquet(p)
-        df["session"] = p.split("/")[-1].removesuffix(".parquet")
+        df["session"] = os.path.basename(p).removesuffix(".parquet")
         dfs.append(df)
     all_rows = pd.concat(dfs, ignore_index=True)
 
