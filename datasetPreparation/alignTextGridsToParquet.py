@@ -127,7 +127,18 @@ def strip_tags(text):
     text = re.sub(r'\s+', '', text)
     return text.strip().lower()
 
-TAG_TOKEN_RE = re.compile(r'^<(n|unk|td)>$', re.IGNORECASE)
+TAG_TOKEN_RE = re.compile(r'^<(n|sil|unk|td)>$', re.IGNORECASE)  # added sil
+
+def count_tags_and_words(clean_text):
+    counts = {"n": 0, "sil": 0, "unk": 0, "td": 0}
+    words = 0
+    for t in clean_text.split():
+        m = TAG_TOKEN_RE.match(t)
+        if m:
+            counts[m.group(1).lower()] += 1
+        else:
+            words += 1  # includes [PM]-style and #word# tokens; fine for a first pass
+    return counts, words
 
 def compute_tag_density(clean_text):
     """Fraction of whitespace-separated tokens in an interval's clean_text
@@ -141,17 +152,6 @@ def compute_tag_density(clean_text):
         return None
     tag_tokens = sum(1 for t in tokens if TAG_TOKEN_RE.match(t))
     return tag_tokens / len(tokens)
-
-def count_tags_and_words(clean_text):
-    counts = {"n": 0, "unk": 0, "td": 0}
-    words = 0
-    for t in clean_text.split():
-        m = TAG_TOKEN_RE.match(t)
-        if m:
-            counts[m.group(1).lower()] += 1
-        else:
-            words += 1  # includes [PM]-style and #word# tokens; fine for a first pass
-    return counts, words
 
 # ---------- Thai number-word parsing (for topic-number disambiguation) ----------
 
