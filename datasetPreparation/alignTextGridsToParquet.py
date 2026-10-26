@@ -140,6 +140,18 @@ def count_tags_and_words(clean_text):
     words = len(re.sub(r'<[^>]+>', ' ', clean_text).split())
     return counts, words
 
+UNK_LEADING_RE = re.compile(r'^\s*(?:<(?:n|sil|r)>[+\s]*)*<unk>', re.IGNORECASE)
+UNK_TRAILING_RE = re.compile(r'<unk>(?:[+\s]*<(?:n|sil|r)>)*\s*$', re.IGNORECASE)
+
+def unk_edges(clean_text):
+    """(unk_leading, unk_trailing) for one interval's clean_text: whether
+    <unk> is the first / last real content once <n>/<r>/<sil> padding and
+    '+'-combined forms (<n>+<unk>, <unk>+<r>) are skipped. A trailing <unk>
+    means the utterance's final word(s) are missing from the parquet
+    sentence, which makes an end-of-turn label on that row less reliable."""
+    return (bool(UNK_LEADING_RE.match(clean_text)),
+            bool(UNK_TRAILING_RE.search(clean_text)))
+
 def compute_tag_density(clean_text):
     """Fraction of whitespace-separated tokens in an interval's clean_text
     (post-speaker-prefix, pre-strip_tags) that are exactly a <n>/<unk>/<td>
@@ -720,7 +732,8 @@ def attach_timestamps_from_alignment(alignment, tg_intervals, pq_rows):
         row["n_sil_tags"] = tag_counts["sil"]
         row["n_unk_tags"] = tag_counts["unk"]
         row["n_td_tags"] = tag_counts["td"]
-        row["n_r_tags"] = tag_counts["r"]      # new
+        row["n_r_tags"] = tag_counts["r"]
+        row["unk_leading"], row["unk_trailing"] = unk_edges(iv["clean_text"])   # new
         row["n_words"] = n_words
         row["has_leading_pad"] = bool(re.match(r"^\s*<(n|sil)>", iv["raw_text"]))
         row["has_trailing_pad"] = bool(re.search(r"<(n|sil)>\s*$", iv["raw_text"]))
