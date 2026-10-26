@@ -75,6 +75,21 @@ def main(timestamped_dir="timestamped"):
     print()
 
     # --- Re-check the extreme density rows now that <sil> is counted ---
+        # --- Where does the <unk> sit? (needs unk_leading / unk_trailing) ---
+    if {"unk_leading", "unk_trailing"} <= set(rows.columns):
+        lead = rows["unk_leading"].astype(bool)
+        trail = rows["unk_trailing"].astype(bool)
+        has_unk = rows["n_unk_tags"] > 0
+        print("<unk> position:")
+        print(f"  leading:  {lead.sum()} rows ({lead.sum() / total:.2%} of all rows)")
+        print(f"  trailing: {trail.sum()} rows ({trail.sum() / total:.2%} of all rows)")
+        print(f"  both:     {(lead & trail).sum()}")
+        print(f"  <unk> rows where it is mid-utterance only: {(has_unk & ~lead & ~trail).sum()}")
+        print(f"  sanity (flag set but n_unk_tags == 0, should be 0): {((lead | trail) & ~has_unk).sum()}")
+        print("  Sample of trailing-<unk> rows (last characters of the sentence):")
+        for _, r in rows[trail].head(10).iterrows():
+            print(f"    {r['session']} @ {r['start_time']:.1f}s | ...{str(r['sentence'])[-25:]}")
+        print()
     high = rows[rows["tag_density"] >= 0.7]
     print(f"Rows with tag_density >= 0.7: {len(high)}")
     for _, r in high.iterrows():
