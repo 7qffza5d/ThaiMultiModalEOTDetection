@@ -131,17 +131,13 @@ def strip_tags(text):
     text = re.sub(r'\s+', '', text)
     return text.strip().lower()
 
-TAG_TOKEN_RE = re.compile(r'^<(n|sil|unk|td)>$', re.IGNORECASE) 
+TAG_RE = re.compile(r'<(n|sil|unk|td|r)>', re.IGNORECASE)
 
 def count_tags_and_words(clean_text):
-    counts = {"n": 0, "sil": 0, "unk": 0, "td": 0}
-    words = 0
-    for t in clean_text.split():
-        m = TAG_TOKEN_RE.match(t)
-        if m:
-            counts[m.group(1).lower()] += 1
-        else:
-            words += 1  # includes [PM]-style and #word# tokens; fine for a first pass
+    counts = {"n": 0, "sil": 0, "unk": 0, "td": 0, "r": 0}
+    for m in TAG_RE.finditer(clean_text):
+        counts[m.group(1).lower()] += 1
+    words = len(re.sub(r'<[^>]+>', ' ', clean_text).split())
     return counts, words
 
 def compute_tag_density(clean_text):
@@ -151,11 +147,9 @@ def compute_tag_density(clean_text):
     by' these tags per section 4.1 filtering. Returns None for a
     zero-token interval (shouldn't occur for anything that survived the
     noise filter in parse_textgrid, but defensive)."""
-    tokens = clean_text.split()
-    if not tokens:
-        return None
-    tag_tokens = sum(1 for t in tokens if TAG_TOKEN_RE.match(t))
-    return tag_tokens / len(tokens)
+    counts, words = count_tags_and_words(clean_text)
+    total = sum(counts.values()) + words
+    return sum(counts.values()) / total if total else None
 
 # ---------- Thai number-word parsing (for topic-number disambiguation) ----------
 
@@ -726,6 +720,7 @@ def attach_timestamps_from_alignment(alignment, tg_intervals, pq_rows):
         row["n_sil_tags"] = tag_counts["sil"]
         row["n_unk_tags"] = tag_counts["unk"]
         row["n_td_tags"] = tag_counts["td"]
+        row["n_r_tags"] = tag_counts["r"]      # new
         row["n_words"] = n_words
         row["has_leading_pad"] = bool(re.match(r"^\s*<(n|sil)>", iv["raw_text"]))
         row["has_trailing_pad"] = bool(re.search(r"<(n|sil)>\s*$", iv["raw_text"]))
