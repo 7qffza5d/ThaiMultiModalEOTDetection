@@ -719,6 +719,7 @@ def attach_timestamps_from_alignment(alignment, tg_intervals, pq_rows):
         row["tag_density"] = compute_tag_density(iv["clean_text"])
         tag_counts, n_words = count_tags_and_words(iv["clean_text"])
         row["n_noise_tags"] = tag_counts["n"]
+        row["n_sil_tags"] = tag_counts["sil"]
         row["n_unk_tags"] = tag_counts["unk"]
         row["n_td_tags"] = tag_counts["td"]
         row["n_words"] = n_words
