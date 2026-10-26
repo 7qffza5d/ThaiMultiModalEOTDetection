@@ -127,7 +127,7 @@ def strip_tags(text):
     text = re.sub(r'\s+', '', text)
     return text.strip().lower()
 
-TAG_TOKEN_RE = re.compile(r'^<(n|sil|unk|td)>$', re.IGNORECASE)  # added sil
+TAG_TOKEN_RE = re.compile(r'^<(n|sil|unk|td)>$', re.IGNORECASE) 
 
 def count_tags_and_words(clean_text):
     counts = {"n": 0, "sil": 0, "unk": 0, "td": 0}
